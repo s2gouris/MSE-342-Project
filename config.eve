@@ -533,20 +533,5 @@ app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
 
-const {defineConfig} = require('cypress');
 
-module.exports = defineConfig({
-  e2e: {
-    baseUrl: 'http://localhost:3000',
-  }
-})
-
-let config = {
-  host    : 'ec2-3-137-65-169.us-east-2.compute.amazonaws.com',
-  user    : 's2gouris',
-  password: 'MSCI342',
-  database: 't2paskar'
-};
- 
-export default config;
 
