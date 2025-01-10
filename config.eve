@@ -1,0 +1,552 @@
+import express from 'express';
+import bodyParser from 'body-parser';
+import nodemailer from 'nodemailer';
+import mysql from 'mysql';
+import config from './config.js'; 
+import jwt from 'jsonwebtoken';
+import multer from 'multer';
+import AWS from 'aws-sdk';
+import dotenv from 'dotenv';
+import OpenAI from 'openai'
+
+dotenv.config();
+
+AWS.config.update({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: 'us-east-1'
+});
+
+const s3 = new AWS.S3();
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const app = express();
+const port = process.env.PORT || 5000;
+const upload = multer();
+
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json());
+
+// Setup Nodemailer for Gmail
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: 'tharanya13p@gmail.com', // using mine just for now
+    pass: 'hybt rlfe jsct wsmu', 
+  },
+});
+
+const connection = mysql.createConnection(config);
+
+// token verification middleware
+const verifyToken = (req, res, next) => {
+  const token = req.headers['authorization'];
+  if (!token) return res.status(403).json({ message: 'Token is required' });
+
+  jwt.verify(token, 'secret_key', (err, decoded) => {
+    if (err) return res.status(401).json({ message: 'Unauthorized' });
+    req.user = decoded;
+    next();
+  });
+};
+
+// Get user API
+app.get('/api/user', verifyToken, (req, res) => {
+  const sql = `SELECT * FROM users WHERE user_id = ?`;
+  connection.query(sql, [req.user.user_id], (error, results) => {
+    if (error) {
+      return res.status(500).json({ error: "Error signing up user" });
+    }
+  res.status(200).json({ user: results[0] });
+  })
+})
+
+// Update user API
+app.put('/api/user', verifyToken, (req, res) => {
+  const { name, program, university } = req.body;
+  const userId = req.user.user_id;
+
+  if (!name || !program || !university) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  const sql = `UPDATE users SET name = ?, program = ?, university = ? WHERE user_id = ?`;
+  connection.query(sql, [name, program, university, userId], (error, results) => {
+    if (error) {
+      return res.status(500).json({ error: "Error updating user data" });
+    }
+    res.status(200).json({ message: "User data updated successfully" });
+  });
+});
+
+// Signup API
+app.post('/api/signup', (req, res) => {
+  const { email, password, name, program, university } = req.body;
+  
+  const sql = `INSERT INTO users (email, password, name, program, university) VALUES (?, ?, ?, ?, ?)`;
+  connection.query(sql, [email, password, name, program, university], (error, results) => {
+    if (error) {
+      return res.status(500).json({ error: "Error signing up user" });
+    }
+    
+    const mailOptions = {
+      from: 'tharanya13p@gmail.com',
+      to: email,
+      subject: 'Please confirm your email',
+      text: 'Thank you for signing up. Please confirm your email by clicking on this link: https://samplelink' // If the app was to be hosted there would be an actual link
+    };
+    
+    transporter.sendMail(mailOptions, function(error, info){
+      if (error) {
+        console.log(error);
+        res.status(500).send('Error sending email');
+      } else {
+        console.log('Email sent: ' + info.response);
+        res.status(200).json({ message: 'Signup successful! Please check your email to confirm.' });
+      }
+    });
+  });
+});
+
+// Login API
+app.post('/api/login', (req, res) => {
+  const { email, password } = req.body;
+  
+  const sql = `SELECT * FROM users WHERE email = ? AND password = ?`;
+  connection.query(sql, [email, password], (error, results) => {
+    if (error) {
+      return res.status(500).json({ error: "Error logging in" });
+    }
+    if (results.length > 0) {
+      
+      const user = results[0];
+            // create session token
+            const token = jwt.sign({ user_id: user.user_id }, 'secret_key', { expiresIn: '5h' });      return res.status(200).json({ message: 'Login successful', token, user: { user_id: user.user_id } });    
+    } else {
+      return res.status(404).json({ message: 'User not found. Please check your login details.' });
+    }
+  });
+});
+
+// Password Reset Request API
+app.post('/api/password-reset', (req, res) => {
+  const { email } = req.body;
+  
+  const sql = `SELECT * FROM users WHERE email = ?`;
+  connection.query(sql, [email], (error, results) => {
+    if (error) {
+      return res.status(500).json({ error: "Error processing request" });
+    }
+    
+    if (results.length > 0) {
+      const resetLink = 'https:samplelink/'; // If the app was to be hosted there would be an actual link
+
+      const mailOptions = {
+        from: 'tharanya13p@gmail.com',
+        to: email,
+        subject: 'Reset your password',
+        text: `You have requested to reset your password. Please click on the following link to proceed: ${resetLink}`
+      };
+
+      transporter.sendMail(mailOptions, function(error, info){
+        if (error) {
+          console.log(error);
+          res.status(500).send('Error sending password reset email');
+        } else {
+          console.log('Password reset email sent: ' + info.response);
+          res.status(200).json({ message: 'Password reset email sent successfully. Please check your email.' });
+        }
+      });
+    } else {
+      return res.status(404).json({ message: 'Email not found. Please check your email address.' });
+    }
+  });
+});
+
+// update password API
+app.post('/api/update-password', (req, res) => {
+  const { email, newPassword } = req.body;
+  
+  const sql = `UPDATE users SET password = ? WHERE email = ?`;
+
+  connection.query(sql, [newPassword, email], (error, results) => {
+    if (error) {
+      return res.status(500).json({ error: "Error updating password" });
+    }
+    if (results.affectedRows > 0) {
+      res.status(200).json({ message: 'Password updated successfully.' });
+    } else {
+      res.status(404).json({ message: 'User not found.' });
+    }
+  });
+});
+
+// create class API
+app.post('/api/create-class', verifyToken, upload.single('image'), (req, res) => {
+  const { class_name, class_code, learn_class_id } = req.body;
+  const file = req.file;
+
+  const params = {
+    Bucket: process.env.AWS_BUCKET_NAME,
+    Key: file.originalname,
+    Body: file.buffer,
+  };
+
+  s3.upload(params, (err, data) => {
+    if (err) {
+      console.error('Error uploading image to S3:', err);
+      return res.status(500).json({ error: 'Error uploading image to S3' });
+    }
+
+    const imageUrl = data.Location;
+
+    const sql = `INSERT INTO classes (class_name, class_code, learn_class_id, professor_name, background_picture_url) VALUES (?, ?, ?, ?, ?)`;
+    connection.query(sql, [class_name, class_code, learn_class_id, req.user.user_id, imageUrl], (error, results) => {
+      if (error) {
+        console.error('Error creating class', error);
+        return res.status(500).json({ error: 'Error creating class' });
+      }
+      const insertedId = results.insertId;
+      res.status(200).json({ message: 'Class created successfully', classId: insertedId });
+    });
+  });
+});
+
+// Fetch all classes API
+app.get('/api/classes', verifyToken, (req, res) => {
+  const userId = req.user.user_id;
+
+  const sql = `
+    SELECT c.*, u.name
+    FROM classes c
+    INNER JOIN users u on c.professor_name = u.user_id
+    JOIN Enrollments e ON c.class_id = e.class_id
+    WHERE e.user_id = ?
+  `;
+
+  connection.query(sql, [userId], (error, results) => {
+    if (error) {
+      console.error(error);
+      return res.status(500).json({ error: "Error fetching classes" });
+    }
+    return res.json(results);
+  });
+});
+
+
+// join class API
+app.post('/api/join-class', verifyToken, (req, res) => {
+  const { classCode } = req.body;
+  const userId = req.user.user_id;
+  const classQuery = 'SELECT class_id FROM classes WHERE class_code = ?';
+  
+  connection.query(classQuery, [classCode], (error, classResults) => {
+    if (error) {
+      console.error(error);
+      return res.status(500).json({ error: "An error occurred while finding the class" });
+    }
+
+    if (classResults.length === 0) {
+      return res.status(404).json({ error: "Class not found" });
+    }
+
+    const classId = classResults[0].class_id;
+
+    const enrollmentQuery = 'INSERT INTO Enrollments (user_id, class_id) VALUES (?, ?)';
+    connection.query(enrollmentQuery, [userId, classId], (error, enrollmentResults) => {
+      if (error) {
+        console.error(error);
+        return res.status(500).json({ error: "An error occurred while joining the class" });
+      }
+
+      res.json({ message: "Successfully joined class" });
+    });
+  });
+});
+
+// Leave class API
+app.delete('/api/leave-class', verifyToken, (req, res) => {
+  const classId = req.body.class_id;
+  const userId = req.user.user_id;
+  const leaveQuery = 'DELETE FROM Enrollments WHERE class_id = ? AND user_id = ?';
+  
+  connection.query(leaveQuery, [classId, userId], (error, results) => {
+    if (error) {
+      console.error(error);
+      return res.status(500).json({ error: "An error occurred while leaving the class" });
+    }
+    if (results.affectedRows < 1) {
+      res.status(404).json('Enrollment not found')
+    }
+    res.json({ message: "Successfully left class" });
+  });
+});
+
+// create post API
+app.post('/api/posts',verifyToken, (req, res) => {
+  const { title, subtitle, body, learn_class_id } = req.body;
+  const user_id = req.user.user_id;
+
+  if (!title || !body || !learn_class_id) {
+    return res.status(400).json({ error: 'Title, body, and learn class ID are required.' });
+  }
+
+  const sql = `INSERT INTO posts (title, subtitle, body, learn_class_id, user_id, created_at) VALUES (?, ?, ?, ?, ?, NOW())`;
+  connection.query(sql, [title, subtitle, body, learn_class_id, user_id], (error, results) => {
+        if (error) {
+      console.error('Error inserting post into the database:', error);
+      return res.status(500).json({ error: "Error inserting post into the database" });
+    }
+
+    const insertedId = results.insertId; 
+    res.status(200).json({ message: 'Post created successfully', postId: insertedId });
+  });
+});
+
+// get post API
+app.get('/api/posts/:learn_class_id', (req, res) => {
+  const { learn_class_id } = req.params;
+  
+  const query = 'SELECT * FROM posts WHERE learn_class_id = ?';
+
+  connection.query(query, [learn_class_id], (error, results) => {
+    if (error) {
+      return res.status(500).json({ error: 'Error fetching posts from the database' });
+    }
+    res.json(results);
+  });
+});
+
+// Update a post api
+app.put('/api/posts/:post_id', (req, res) => {
+  const { post_id } = req.params; 
+  const { title, subtitle, body } = req.body;
+
+  if (!title || !body) {
+    return res.status(400).json({ error: 'Title and body are required.' });
+  }
+
+  const query = 'UPDATE posts SET title = ?, subtitle = ?, body = ? WHERE post_id = ?';
+  
+  connection.query(query, [title, subtitle, body, post_id], (error, results) => {
+    if (error) {
+      console.error('Error updating the post:', error);
+      return res.status(500).json({ error: 'Error updating the post in the database' });
+    }
+    if (results.affectedRows === 0) {
+      return res.status(404).json({ message: 'Post not found' });
+    }
+    res.json({ message: 'Post updated successfully' });
+  });
+});
+
+
+app.get('/api/posts/:post_id', (req, res) => {
+  const { post_id } = req.params;
+  
+  const query = 'SELECT * FROM posts WHERE post_id = ?';
+
+  connection.query(query, [post_id], (error, results) => {
+      if (error) {
+          console.error('Error fetching the post from the database:', error);
+          return res.status(500).json({ error: "Error fetching the post from the database" });
+      }
+      
+      if (results.length > 0) {
+          res.json(results[0]);
+      } else {
+          res.status(404).json({ message: 'Post not found' });
+      }
+  });
+});
+
+app.post('/api/comments', (req, res) => {
+  const { post_id, content, parent_comment_id } = req.body;
+
+  connection.query(
+    'INSERT INTO comments (post_id, content, parent_comment_id, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())',
+    [post_id, content, parent_comment_id || null],
+    (error, results) => {
+      if (error) {
+        console.error('Failed to create comment:', error);
+        return res.status(500).json({ error: 'Internal server error' });
+      }
+      const insertedComment = {
+        id: results.insertId,
+        post_id,
+        parent_comment_id,
+        content,
+        nestedComments: []  
+      };
+      res.status(201).json(insertedComment);
+    }
+  );
+});
+
+
+
+app.get('/api/comments/:post_id', (req, res) => {
+  const { post_id } = req.params;
+
+  connection.query(
+    `SELECT * FROM comments WHERE post_id = ? ORDER BY created_at`,
+    [post_id],
+    (error, comments) => {
+      if (error) {
+        console.error('Error fetching comments:', error);
+        return res.status(500).json({ error: 'Error fetching comments from the database' });
+      }
+      
+      const buildNestedComments = (comments, parentId = null) => {
+        return comments
+          .filter(comment => comment.parent_comment_id === parentId)
+          .map(comment => ({
+            ...comment,
+            nestedComments: buildNestedComments(comments, comment.id)
+          }));
+      };
+      const nestedComments = buildNestedComments(comments);
+
+      res.json(nestedComments);
+    }
+  );
+});
+
+
+app.post('/api/posts/like/:post_id', verifyToken, (req, res) => {
+  const { post_id } = req.params;
+  const user_id = req.user.user_id; 
+
+  const checkQuery = 'SELECT 1 FROM user_likes WHERE post_id = ? AND user_id = ?';
+  connection.query(checkQuery, [post_id, user_id], (error, results) => {
+    if (error) {
+      console.error('Error checking for existing like:', error);
+      return res.status(500).json({ error: 'Error checking for existing like' });
+    }
+    if (results.length > 0) {
+      return res.status(400).json({ message: 'User has already liked this post' });
+    } else {
+      const insertLikeQuery = 'INSERT INTO user_likes (user_id, post_id) VALUES (?, ?)';
+      connection.query(insertLikeQuery, [user_id, post_id], (insertError) => {
+        if (insertError) {
+          console.error('Error inserting like:', insertError);
+          return res.status(500).json({ error: 'Error inserting like' });
+        }
+        const updatePostLikesQuery = 'UPDATE posts SET likes = likes + 1 WHERE post_id = ?';
+        connection.query(updatePostLikesQuery, [post_id], (updateError) => {
+          if (updateError) {
+            console.error('Error updating post likes:', updateError);
+          }
+          res.json({ message: 'Like added successfully' });
+        });
+      });
+    }
+  });
+});
+
+
+
+app.delete('/api/comments/:commentId', (req, res) => {
+  const { commentId } = req.params;
+
+  connection.query(
+    'DELETE FROM comments WHERE id = ?',
+    [commentId],
+    (error, results) => {
+      if (error) {
+        console.error('Error deleting comment:', error);
+        return res.status(500).json({ error: 'Error deleting comment from the database' });
+      }
+      if (results.affectedRows === 0) {
+        return res.status(404).json({ error: 'Comment not found' });
+      } else {
+        res.json({ message: 'Comment deleted successfully' });
+      }
+    }
+  );
+});
+
+// Get recent posts API
+app.get('/api/notifications', verifyToken, (req, res) => {
+  const userId = req.user.user_id;
+  
+  const query = `
+    SELECT p.post_id, p.title, p.body, p.created_at, c.learn_class_id
+    FROM posts p
+    INNER JOIN classes c ON p.learn_class_id = c.learn_class_id
+    INNER JOIN Enrollments e ON c.class_id = e.class_id
+    WHERE e.user_id = ?
+    ORDER BY p.created_at DESC
+    LIMIT 15
+  `;
+  
+  connection.query(query, [userId], (error, results) => {
+    if (error) {
+      console.error(error);
+      return res.status(500).json({ error: "Error fetching recent posts" });
+    }
+    res.json(results);
+  });
+})
+
+// Get GPT response
+app.post('/api/openai', verifyToken, async (req, res) => {
+  const { prompt } = req.body;
+
+  try{
+    const completion = await openai.chat.completions.create({
+      messages: [{ role: "system", content: prompt }],
+      model: "gpt-3.5-turbo",
+    });
+
+    res.status(200).json(completion.choices[0]);
+  } catch (error) {
+    res.status(400).json('Error getting openai response')
+  }
+});
+
+app.delete('/api/posts/:postId', verifyToken, (req, res) => {
+  const { postId } = req.params;
+  const userId = req.user.user_id; 
+
+  const ownershipCheckSql = 'SELECT 1 FROM posts WHERE post_id = ? AND user_id = ? LIMIT 1';
+  connection.query(ownershipCheckSql, [postId, userId], (error, results) => {
+    if (error || results.length === 0) {
+      return res.status(403).json({ error: 'Unauthorized to delete this post' });
+    }
+
+    const deleteSql = 'DELETE FROM posts WHERE post_id = ?';
+    connection.query(deleteSql, [postId], (deleteError) => {
+      if (deleteError) {
+        console.error('Error deleting post from the database:', deleteError);
+        return res.status(500).json({ error: "Error deleting post from the database" });
+      }
+
+      res.json({ message: 'Post deleted successfully' });
+    });
+  });
+});
+
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
+
+const {defineConfig} = require('cypress');
+
+module.exports = defineConfig({
+  e2e: {
+    baseUrl: 'http://localhost:3000',
+  }
+})
+
+let config = {
+  host    : 'ec2-3-137-65-169.us-east-2.compute.amazonaws.com',
+  user    : 's2gouris',
+  password: 'MSCI342',
+  database: 't2paskar'
+};
+ 
+export default config;
+
